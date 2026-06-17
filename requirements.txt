@@ -1,0 +1,6 @@
+openai>=1.0.0
+docker>=7.0.0
+pytest>=8.0.0
+
+# sqlite3 and argparse are part of the Python standard library and do not
+# need to be installed separately.
