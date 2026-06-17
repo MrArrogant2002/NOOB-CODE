@@ -36,7 +36,20 @@ def warn(msg: str) -> None:
     print(f"{YELLOW}!{RESET} {msg}")
 
 
+def _resolve_cmd(name: str) -> str:
+    """On Windows npm/npx/vsce ship as .cmd scripts; shutil.which finds them."""
+    found = shutil.which(name)
+    if found:
+        return found
+    if sys.platform == "win32":
+        found = shutil.which(name + ".cmd")
+        if found:
+            return found
+    return name  # let subprocess raise a clear error
+
+
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    cmd = [_resolve_cmd(cmd[0])] + cmd[1:]
     return subprocess.run(cmd, **kwargs)
 
 

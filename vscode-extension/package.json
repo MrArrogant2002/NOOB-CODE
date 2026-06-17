@@ -4,6 +4,8 @@
   "description": "Local AI coding agent powered by Ollama — works offline on your own hardware",
   "version": "0.1.0",
   "publisher": "noob-code",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/Mr-Arr0gant/Self-Debugging-Coding-Agent" },
   "engines": { "vscode": "^1.85.0" },
   "categories": ["AI", "Other"],
   "activationEvents": ["onStartupFinished"],
