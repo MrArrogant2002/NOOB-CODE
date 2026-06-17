@@ -30,7 +30,7 @@ let panelProvider: NoobCodePanel | undefined;
 
 // ── Activation ────────────────────────────────────────────────────────────────
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
+export function activate(context: vscode.ExtensionContext): void {
   outputChannel = vscode.window.createOutputChannel("NOOB CODE Backend");
   context.subscriptions.push(outputChannel);
 
@@ -41,29 +41,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     .getConfiguration("noobCode")
     .get<number>("backendPort", 7867);
 
-  // Start backend if not already alive (Risk 1: check health first)
-  const alreadyRunning = await checkHealth(port);
-  if (!alreadyRunning) {
-    backendProcess = startBackend(context, port);
-    const ready = await waitForHealth(port, 30_000);
-    if (!ready) {
-      vscode.window.showErrorMessage(
-        "NOOB CODE: Backend did not start within 30 s. " +
-          "Check the 'NOOB CODE Backend' output channel for errors."
-      );
-      return;
-    }
-  }
-
-  // Read the session token from the file the backend wrote on startup
-  const token = await readSessionToken(context, port);
-
-  // Create the WebSocket client and connect
+  // Create the WebSocket client (not yet connected)
   const client = new NoobCodeClient();
-  client.connect(port, token);
   context.subscriptions.push({ dispose: () => client.disconnect() });
 
-  // Create and register the sidebar panel
+  // Register panel and commands immediately so the sidebar is usable right away.
+  // The WebSocket connects in the background — the panel shows "connecting…" until
+  // the `hello` event fires.
   panelProvider = new NoobCodePanel(context, client);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(NoobCodePanel.viewId, panelProvider, {
@@ -133,6 +117,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     })
   );
+
+  // Start the backend in the background so the panel is never blocked.
+  // Risk 1 (multiple windows): checkHealth first — if already alive, skip spawn.
+  void (async () => {
+    const alreadyRunning = await checkHealth(port);
+    if (!alreadyRunning) {
+      backendProcess = startBackend(context, port);
+      const ready = await waitForHealth(port, 30_000);
+      if (!ready) {
+        vscode.window.showErrorMessage(
+          "NOOB CODE: Backend did not start within 30 s. " +
+            "Check the 'NOOB CODE Backend' output channel for errors."
+        );
+        return;
+      }
+    }
+    const token = await readSessionToken(context, port);
+    client.connect(port, token);
+  })();
 }
 
 // ── Deactivation ──────────────────────────────────────────────────────────────
@@ -147,11 +150,27 @@ export function deactivate(): void {
 // ── Backend lifecycle ──────────────────────────────────────────────────────────
 
 function startBackend(context: vscode.ExtensionContext, port: number): ChildProcess {
-  // Extension lives inside vscode-extension/; the Python project is one level up
-  const projectRoot = path.resolve(context.extensionPath, "..");
-  const python = process.platform === "win32" ? "python" : "python3";
+  // backendRoot is written by setup.py into VS Code user settings.
+  // Fall back to one level above extensionPath for dev-mode (unpackaged) use.
+  const backendRoot =
+    vscode.workspace.getConfiguration("noobCode").get<string>("backendRoot", "") ||
+    path.resolve(context.extensionPath, "..");
 
+  // Use the venv Python so uvicorn + all deps are available without PATH tricks.
+  const venvPython =
+    process.platform === "win32"
+      ? path.join(backendRoot, ".venv", "Scripts", "python.exe")
+      : path.join(backendRoot, ".venv", "bin", "python3");
+  const python = fs.existsSync(venvPython)
+    ? venvPython
+    : process.platform === "win32"
+    ? "python"
+    : "python3";
+
+  const projectRoot = backendRoot;
   outputChannel.appendLine(`[NOOB CODE] Starting backend on port ${port}…`);
+  outputChannel.appendLine(`[NOOB CODE] Project root: ${projectRoot}`);
+  outputChannel.appendLine(`[NOOB CODE] Python: ${python}`);
 
   const proc = spawn(
     python,

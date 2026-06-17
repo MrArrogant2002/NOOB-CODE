@@ -47,7 +47,8 @@
         "noobCode.permissionMode":   { "type": "string",  "default": "ask", "enum": ["ask", "auto-approve", "yolo"], "description": "Permission level for file and shell operations" },
         "noobCode.gpuLayers":        { "type": "number",  "default": -1,                          "description": "Ollama GPU layers (-1 = auto)" },
         "noobCode.maxContextTokens": { "type": "number",  "default": 0,                           "description": "Override context window size (0 = auto-detect from model)" },
-        "noobCode.dockerEnabled":    { "type": "boolean", "default": true,                        "description": "Use Docker sandbox for code execution" }
+        "noobCode.dockerEnabled":    { "type": "boolean", "default": true,                        "description": "Use Docker sandbox for code execution" },
+        "noobCode.backendRoot":      { "type": "string",  "default": "",                          "description": "Absolute path to the NOOB CODE project directory (set automatically by setup.py)" }
       }
     },
     "keybindings": [

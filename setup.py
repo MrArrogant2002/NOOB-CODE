@@ -7,6 +7,8 @@ Usage:
 """
 
 import argparse
+import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -51,6 +53,36 @@ def _resolve_cmd(name: str) -> str:
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     cmd = [_resolve_cmd(cmd[0])] + cmd[1:]
     return subprocess.run(cmd, **kwargs)
+
+
+def _vscode_settings_path() -> Path:
+    """Return the VS Code user settings.json path for the current OS."""
+    system = platform.system()
+    home = Path.home()
+    if system == "Windows":
+        return home / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
+    if system == "Darwin":
+        return (
+            home / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+        )
+    return home / ".config" / "Code" / "User" / "settings.json"
+
+
+def write_vscode_setting(key: str, value: str) -> None:
+    """Upsert a single key in VS Code user settings.json."""
+    settings_path = _vscode_settings_path()
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    settings[key] = value
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    ok(f"VS Code setting written: {key} = {value}")
 
 
 # ── Prerequisite checks ───────────────────────────────────────────────────────
@@ -193,6 +225,7 @@ def main() -> None:
     install_python_deps()
     build_extension()
     install_extension()
+    write_vscode_setting("noobCode.backendRoot", str(ROOT.resolve()))
 
     print(f"\n{GREEN}{'='*50}")
     print("  NOOB CODE installed successfully!")
