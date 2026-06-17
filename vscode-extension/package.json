@@ -1,0 +1,71 @@
+{
+  "name": "noob-code",
+  "displayName": "NOOB CODE",
+  "description": "Local AI coding agent powered by Ollama — works offline on your own hardware",
+  "version": "0.1.0",
+  "publisher": "noob-code",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "noob-code-container",
+          "title": "NOOB CODE",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "noob-code-container": [
+        {
+          "type": "webview",
+          "id": "noobCodePanel",
+          "name": "NOOB CODE"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "noobCode.newTask",        "title": "NOOB CODE: New Task" },
+      { "command": "noobCode.debugFix",       "title": "NOOB CODE: Debug Fix Current File" },
+      { "command": "noobCode.openPanel",      "title": "NOOB CODE: Open Panel" },
+      { "command": "noobCode.newSession",     "title": "NOOB CODE: New Session" },
+      { "command": "noobCode.exportSession",  "title": "NOOB CODE: Export Session to Markdown" },
+      { "command": "noobCode.reindex",        "title": "NOOB CODE: Re-index Workspace" }
+    ],
+    "configuration": {
+      "title": "NOOB CODE",
+      "properties": {
+        "noobCode.ollamaUrl":        { "type": "string",  "default": "http://localhost:11434/v1", "description": "Ollama base URL" },
+        "noobCode.defaultModel":     { "type": "string",  "default": "qwen2.5-coder:7b",         "description": "Default model" },
+        "noobCode.backendPort":      { "type": "number",  "default": 7867,                        "description": "Backend server port" },
+        "noobCode.planModeDefault":  { "type": "boolean", "default": false,                       "description": "Start every task in plan mode" },
+        "noobCode.permissionMode":   { "type": "string",  "default": "ask", "enum": ["ask", "auto-approve", "yolo"], "description": "Permission level for file and shell operations" },
+        "noobCode.gpuLayers":        { "type": "number",  "default": -1,                          "description": "Ollama GPU layers (-1 = auto)" },
+        "noobCode.maxContextTokens": { "type": "number",  "default": 0,                           "description": "Override context window size (0 = auto-detect from model)" },
+        "noobCode.dockerEnabled":    { "type": "boolean", "default": true,                        "description": "Use Docker sandbox for code execution" }
+      }
+    },
+    "keybindings": [
+      { "command": "noobCode.newTask",  "key": "ctrl+shift+n", "when": "editorFocus" },
+      { "command": "noobCode.debugFix", "key": "ctrl+shift+d", "when": "editorFocus" }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch":   "tsc -watch -p ./",
+    "package": "npx vsce package"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/vscode":  "^1.85.0",
+    "@types/node":    "^20.0.0",
+    "@types/ws":      "^8.5.10",
+    "typescript":     "^5.0.0",
+    "@vscode/vsce":   "^2.0.0"
+  }
+}

@@ -2,5 +2,15 @@ openai>=1.0.0
 docker>=7.0.0
 pytest>=8.0.0
 
-# sqlite3 and argparse are part of the Python standard library and do not
-# need to be installed separately.
+# Backend server (NOOB CODE)
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0.0
+
+# Token counting (approximation for all major model families)
+tiktoken>=0.7.0
+
+# File indexing (signatures.py currently uses regex; tree-sitter grammars are Phase 5+)
+tree-sitter>=0.23.0
+
+# sqlite3, argparse, secrets, pathlib, re are Python standard library.

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none';
+                 style-src {{CSP_SOURCE}} 'unsafe-inline';
+                 script-src 'nonce-{{NONCE}}' {{CSP_SOURCE}};" />
+  <title>NOOB CODE</title>
+  <link rel="stylesheet" href="{{CSS_URI}}" />
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header id="header">
+    <span class="logo">NOOB CODE</span>
+    <div class="header-controls">
+      <select id="model-select" title="Active model"></select>
+      <button id="plan-toggle" type="button" class="icon-btn" title="Toggle plan mode">Plan</button>
+      <button id="new-session-btn" type="button" class="icon-btn" title="New session">New</button>
+    </div>
+  </header>
+
+  <!-- Status bar (connected / disconnected / warming up) -->
+  <div id="status-bar" class="status-bar disconnected">Connecting to backend…</div>
+
+  <!-- ── Chat area ───────────────────────────────────────────────────────── -->
+  <div id="chat" role="log" aria-live="polite" aria-label="Conversation"></div>
+
+  <!-- ── Input area ─────────────────────────────────────────────────────── -->
+  <footer id="footer">
+    <div class="input-row">
+      <textarea
+        id="task-input"
+        rows="3"
+        placeholder="Type a task… use @filename to attach a file"
+        aria-label="Task input"
+      ></textarea>
+    </div>
+    <div class="btn-row">
+      <span id="session-label" class="session-label"></span>
+      <div class="btn-group">
+        <button id="cancel-btn" type="button" class="secondary-btn" disabled>Cancel</button>
+        <button id="send-btn" type="button" class="primary-btn" disabled>Send ▶</button>
+      </div>
+    </div>
+  </footer>
+
+  <script nonce="{{NONCE}}" src="{{JS_URI}}"></script>
+</body>
+</html>

@@ -1,88 +1,142 @@
-# Self-Debugging Coding Agent
+# NOOB CODE
 
-A local, model-agnostic coding agent built on Ollama. It ships two entrypoints:
+A local, fully-featured VS Code coding agent powered by any Ollama model.
+Works completely offline on your own hardware — no cloud API, no API keys.
 
-- **`main.py`** — a single-problem agent: generate code for a problem, run it in a sandboxed Docker container, classify the failure into one of 5 categories (SyntaxError, RuntimeError, LogicError, TimeoutError, ImportError), apply a targeted repair prompt per category, and loop until it passes or hits a max-iteration budget. Every iteration is logged to SQLite.
-- **`orchestrator_cli.py`** — a scoped, repo-aware coding agent (a small Claude-Code-style loop): the model calls tools (read/write/edit files, run shell commands and tests inside a sandboxed container, git diff/status) to accomplish a task against a real repository, including a `debug_fix` tool that reuses the same classification-guided repair logic targeted at a real file.
+Provides a Claude Code-style interface with:
 
-Everything runs against a **local** Ollama model — no cloud LLM API is used anywhere in this project.
+- Streaming token-by-token responses in a sidebar chat panel
+- Edit approval with side-by-side diffs before any file is written
+- Shell/git permission gates (ask / auto-approve / yolo modes)
+- Plan mode: review numbered steps before the agent executes anything
+- Three-layer memory: in-context working memory, SQLite session store, and a per-workspace `memory.md` that persists facts across sessions
+- Compact codebase map injected into every prompt so the agent knows what's in the repo
+- `@file` mentions in the chat to attach file content to the task
+- One-command keyboard shortcuts (`Ctrl+Shift+N` new task, `Ctrl+Shift+D` debug fix)
+
+---
 
 ## Prerequisites
 
-- Python 3.11+
-- [Ollama](https://ollama.com) installed and running locally
-- [Docker](https://www.docker.com/products/docker-desktop/) installed and running (used to sandbox all code execution — the agent never uses `eval()`/`exec()` directly)
-- A pulled Ollama model with decent code/tool-use ability, e.g.:
-  ```bash
-  ollama pull qwen2.5-coder:7b
-  ```
+| Requirement | Version | Notes |
+|---|---|---|
+| Python | 3.11+ | Backend server |
+| [Ollama](https://ollama.com) | latest | Must be running locally |
+| [Docker](https://www.docker.com/products/docker-desktop/) | latest | Sandbox for shell/test execution |
+| [Node.js](https://nodejs.org) | 18+ | Building the VS Code extension |
+| VS Code | 1.85+ | Target editor |
+
+Pull a model before first use:
+```bash
+ollama pull qwen2.5-coder:7b
+```
+
+---
 
 ## Setup
 
 ```bash
 git clone <this-repo-url>
 cd Self-Debugging-Coding-Agent
-pip install -r requirements.txt
+python setup.py
 ```
 
-No API keys or secrets are required anywhere in this project.
+`setup.py` checks all prerequisites, installs Python dependencies, compiles the TypeScript extension, packages the `.vsix`, and installs it into VS Code automatically.
 
-## Configuration
+After setup, reload VS Code (`Ctrl+Shift+P` → **Reload Window**) and click the robot icon in the activity bar.
 
-All settings in [config.py](config.py) can be overridden by an environment variable of the same name — no code edits needed to point this at a different Ollama host or model:
+### Update backend only (after pulling new commits)
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama's OpenAI-compatible endpoint. Change this if Ollama runs on a different host/port. |
-| `PRIMARY_MODEL` | `qwen2.5-coder:7b` | Default model for generation/repair (also overridable per-run via `--model`). |
-| `FALLBACK_MODEL` | `codellama:7b` | Used by `main.py` if the primary model call fails. |
-| `MAX_ITERATIONS` | `5` | Max repair iterations for the single-problem agent. |
-| `TIMEOUT_SECONDS` | `10` | Execution timeout for the single-problem agent's judge sandbox. |
-| `DOCKER_IMAGE` | `python:3.11-slim` | Sandbox base image. |
-| `DOCKER_MEMORY_LIMIT` | `256m` | Sandbox container memory cap. |
-| `MAX_ORCHESTRATION_STEPS` | `15` | Max tool-call steps for the orchestrator. |
-| `ORCH_SHELL_TIMEOUT` | `60` | Per-command timeout for the orchestrator's shell/test tools. |
-
-Example:
 ```bash
-export OLLAMA_BASE_URL=http://192.168.1.50:11434/v1
-export PRIMARY_MODEL=qwen2.5-coder:14b
+python setup.py --update
 ```
 
-**Model requirement:** the orchestrator's tool-calling does not rely on Ollama's structured `tool_calls` response field — it parses tool calls directly out of the model's text output (see [orchestrator/parser.py](orchestrator/parser.py)), since that field has been observed to stay empty even for models that advertise tool-calling support. This means most instruction-following code models work, not just ones Ollama lists as officially "tools"-capable — but small/weak models will plan less reliably in multi-step tool use than larger ones.
+---
 
 ## Usage
 
-### Single-problem agent
-```bash
-python main.py --problem "Print the sum of integers 1 to 10 inclusive." --expected "55"
-```
-Prints iteration-by-iteration progress, the final code, and (on success) generated pytest tests. Every iteration is logged to `data/logs.db`.
+1. Open any project folder in VS Code.
+2. Click the **NOOB CODE** robot icon in the activity bar to open the chat panel.
+3. Type a task and press **Send** (or `Ctrl+Enter`).
+4. Use `@filename` in your message to attach a file's content to the task context.
 
-### Repo-aware orchestrator
-```bash
-python orchestrator_cli.py --repo /path/to/some/project --task "Run the test suite and fix any failing tests."
-```
-Flags: `--model`, `--max-steps`, `--allow-test-edits` (off by default — the agent cannot modify test files unless this is passed, so it can't make a failing test pass by weakening the test instead of fixing the bug).
+### Keyboard shortcuts
 
-By default, `run_shell`/`run_tests`/`debug_fix` execute inside a Docker container with your repo bind-mounted (network enabled, so the agent can `pip install`/`npm install` real dependencies) — not your host shell directly.
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Shift+N` | Open panel / new task |
+| `Ctrl+Shift+D` | Debug fix — runs tests on the current file, repairs failures automatically |
 
-### Benchmarks (HumanEval / MBPP)
-```python
-from eval.benchmark import run_benchmark
-run_benchmark("humaneval", limit=10)
+### Commands (`Ctrl+Shift+P`)
+
+| Command | Description |
+|---|---|
+| NOOB CODE: New Task | Open the panel |
+| NOOB CODE: Debug Fix Current File | Auto-send a debug-fix task for the active file |
+| NOOB CODE: New Session | Start a fresh session (clears chat) |
+| NOOB CODE: Export Session to Markdown | Save the conversation to a `.md` file |
+| NOOB CODE: Re-index Workspace | Rebuild the codebase map immediately |
+
+---
+
+## Configuration
+
+All settings are available under **Settings → NOOB CODE** or via `noobCode.*` in `settings.json`:
+
+| Setting | Default | Description |
+|---|---|---|
+| `noobCode.defaultModel` | `qwen2.5-coder:7b` | Ollama model to use |
+| `noobCode.backendPort` | `7867` | Port for the local backend server |
+| `noobCode.permissionMode` | `ask` | `ask` / `auto-approve` / `yolo` |
+| `noobCode.planModeDefault` | `false` | Start every task in plan mode |
+| `noobCode.ollamaUrl` | `http://localhost:11434/v1` | Ollama base URL |
+| `noobCode.dockerEnabled` | `true` | Use Docker sandbox for code execution |
+| `noobCode.maxContextTokens` | `0` | Override context window size (0 = auto-detect) |
+| `noobCode.gpuLayers` | `-1` | Ollama GPU layers (-1 = auto) |
+
+Backend constants (override via environment variables, same names as in `config.py`):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint |
+| `PRIMARY_MODEL` | `qwen2.5-coder:7b` | Default model |
+| `MAX_ORCHESTRATION_STEPS` | `15` | Max tool-call steps per task |
+| `ORCH_SHELL_TIMEOUT` | `60` | Per-command timeout (seconds) |
+| `LONG_TERM_MEMORY_MAX_TOKENS` | `500` | Cap on memory.md injected into context |
+| `CODEBASE_MAP_MAX_TOKENS` | `2000` | Cap on codebase map in context |
+| `CHECKPOINT_KEEP_LAST` | `5` | Number of git stash checkpoints to keep |
+
+---
+
+## How it works
+
+```text
+[VS Code Extension — TypeScript]
+         ↕  WebSocket  ws://127.0.0.1:7867/ws?token=<session_token>
+[FastAPI Backend — Python]
+         ↕
+[Ollama API] + [Docker Sandbox] + [SQLite] + [File System]
 ```
-Downloads the dataset to `data/` on first use and prints pass@1 (and pass@5 if `num_samples >= 5`).
+
+- The extension is pure UI — all intelligence is in the backend.
+- The backend streams LLM tokens over WebSocket in real time.
+- Every task is protected by a git stash checkpoint before the first file write, so a crash mid-edit can be fully rolled back.
+- The session token (`data/.session_token`) prevents other local processes from connecting to your backend.
+
+---
 
 ## Running tests
 
 ```bash
 pytest tests/ -v
 ```
-All tests mock the LLM and Docker calls, so the suite runs without Ollama or Docker available.
+
+All backend tests run without Ollama, Docker, or VS Code — external calls are mocked.
+
+---
 
 ## Known limitations
 
-- **Model planning variance**: small local models (7B-class) sometimes flounder in multi-step tool use — hallucinating a tool name, retrying a failing command without adapting, or needing the full step budget for tasks that a larger model finishes in a few steps. The orchestrator's mechanics (error reporting, container cleanup, step budget) stay robust in every case observed; only the model's judgment varies run to run.
-- **No automatic model fallback in the orchestrator** (unlike `main.py`, which falls back from `PRIMARY_MODEL` to `FALLBACK_MODEL` on API failure).
-- **Windows + Docker Desktop bind-mount I/O** can be significantly slower than native Linux for many-small-file operations (e.g. creating a virtualenv inside the sandboxed container) — this can cause an otherwise-fine command to hit `ORCH_SHELL_TIMEOUT`.
+- **Model planning variance**: 7B-class models sometimes struggle with multi-step tool use — they may retry a failing command without adapting or exhaust the step budget on tasks a larger model finishes quickly. The agent mechanics stay robust; only the model's judgment varies.
+- **Windows + Docker Desktop bind-mount I/O** can be significantly slower than native Linux for many-small-file operations inside sandboxed containers, which may cause a command to hit `ORCH_SHELL_TIMEOUT`.
+- **Tool-call format**: The parser reads tool calls from the model's text content (not from Ollama's `tool_calls` field), so most instruction-following code models work — not just officially "tools"-capable ones.

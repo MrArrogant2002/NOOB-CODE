@@ -9,6 +9,15 @@ data/*.db
 data/HumanEval.jsonl.gz
 data/mbpp.jsonl
 
+# Backend runtime files
+data/.daemon.lock
+data/.session_token
+
+# VS Code extension build artefacts
+vscode-extension/node_modules/
+vscode-extension/out/
+*.vsix
+
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
