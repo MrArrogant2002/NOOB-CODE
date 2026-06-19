@@ -63,6 +63,7 @@ from config import (
     BACKEND_PORT,
     BACKEND_VERSION,
     CODEBASE_MAP_MAX_TOKENS,
+    CONVERSATION_HISTORY_MESSAGES,
     MAX_ORCHESTRATION_STEPS,
     OLLAMA_BASE_URL,
     PRIMARY_MODEL,
@@ -345,6 +346,9 @@ async def _run_task(websocket: WebSocket, conn: ConnectionState, msg: dict) -> N
     )
     session_id: str = session["session_id"]
 
+    # Load the last N messages as cross-task conversation context
+    raw_history: list[dict] = session["messages"][-CONVERSATION_HISTORY_MESSAGES:]
+
     # Always send session_info so the panel can display the session ID and
     # use it for cancellation — even on the very first task for a workspace.
     await _send(
@@ -368,6 +372,7 @@ async def _run_task(websocket: WebSocket, conn: ConnectionState, msg: dict) -> N
         long_term_notes=ltm_notes,
         codebase_map=codebase_map,
         allow_test_edits=allow_test_edits,
+        conversation_history=raw_history,
     )
     memory.add_user_message(task_text)
 
@@ -400,6 +405,7 @@ async def _run_task(websocket: WebSocket, conn: ConnectionState, msg: dict) -> N
             )
             await asyncio.to_thread(append_message, session_id, "user", task_text)
             if final:
+                await asyncio.to_thread(append_message, session_id, "assistant", final)
                 await asyncio.to_thread(
                     update_after_task, task_text, final, workspace, model
                 )
@@ -541,6 +547,7 @@ async def _plan_mode(
         long_term_notes=memory.long_term_notes,
         codebase_map=memory.codebase_map,
         allow_test_edits=memory.allow_test_edits,
+        conversation_history=memory._conv_history,
     )
     user_msg = memory._recent[-1]["content"] if memory._recent else ""
     plan_memory.add_user_message(

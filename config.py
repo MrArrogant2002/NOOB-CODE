@@ -34,6 +34,10 @@ LONG_TERM_MEMORY_MAX_TOKENS = int(os.environ.get("LONG_TERM_MEMORY_MAX_TOKENS", 
 WORKING_MEMORY_SLIDING_WINDOW = int(
     os.environ.get("WORKING_MEMORY_SLIDING_WINDOW", "10")
 )
+# How many past session messages to feed back as cross-task conversation context
+CONVERSATION_HISTORY_MESSAGES = int(
+    os.environ.get("CONVERSATION_HISTORY_MESSAGES", "8")
+)
 
 # Codebase indexer
 INDEXER_MAX_FILE_SIZE_BYTES = int(

@@ -6,7 +6,8 @@ Budget allocation (highest priority = last to be truncated):
   3. Codebase map           — capped at CODEBASE_MAP_MAX_TOKENS
   4. Task plan (plan mode)  — kept if fits, dropped if over budget
   5. Current file content   — capped at 30 % of remaining budget
-  6. Recent messages        — oldest pair dropped first (sliding window)
+  6. Cross-task history     — last N session turns, oldest pair dropped first
+  7. Recent tool exchanges  — current task loop, oldest pair dropped first
 """
 
 import logging
@@ -39,11 +40,18 @@ _SYSTEM_TEMPLATE = (
     "RULE 2 — coding tasks: work step by step, call one tool at a time, read its result, then "
     "decide the next step. Call `finish` when done. "
     "Do not call `finish` until you have verified your changes by running tests when available. "
-    "RULE 3 — file operations: to create or modify any file you MUST call `write_file` or "
-    "`edit_file`. Never write file content as plain text in your response — text in your reply "
-    "does NOT create a file on disk. Only tool calls write to the filesystem. "
+    "RULE 3 — file operations: ALWAYS call `write_file` or `edit_file` to create or modify any "
+    "file — NEVER write file content as plain text in your response. Text in your reply does NOT "
+    "write to disk; only the tool call does. Never say 'I have created/updated/modified [file]' "
+    "unless write_file or edit_file was already called in this task — the claim does not make it "
+    "happen. If a task requires creating or editing a file, the tool call MUST come first. "
     "RULE 4 — no tool-call echoing: do NOT include tool-call JSON in your text reply. "
     "Emit only the tool call itself; your next text turn should be reasoning or the final answer. "
+    "RULE 5 — documentation and overview tasks: before writing any summary, overview, or "
+    "documentation file, ALWAYS (a) call list_dir to discover all project files, "
+    "(b) call read_file on each key file to understand its actual content and function names, "
+    "(c) then call write_file with specific, file-by-file details from what you actually read — "
+    "never write vague, generic, or placeholder descriptions. "
     "{test_policy}"
 )
 
@@ -84,6 +92,7 @@ class WorkingMemory:
         long_term_notes: str = "",
         codebase_map: str = "",
         allow_test_edits: bool = False,
+        conversation_history: list[dict] | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.long_term_notes = long_term_notes
@@ -92,6 +101,10 @@ class WorkingMemory:
         self.current_file: str | None = None
         self.task_plan: list[str] = []
         self._recent: list[dict] = []
+        # Cross-task conversation context loaded from SQLite session store
+        self._conv_history: list[dict] = (
+            list(conversation_history) if conversation_history else []
+        )
 
     @property
     def _system_prompt(self) -> str:
@@ -156,18 +169,28 @@ class WorkingMemory:
                     }
                 )
 
-        # --- Layer 6: recent conversation (sliding window, oldest dropped first) ---
+        # --- Layer 6: cross-task conversation history (oldest pair dropped first) ---
+        conv_hist: list[dict] = [
+            {"role": e.get("role", "user"), "content": e.get("content", "")}
+            for e in self._conv_history
+            if e.get("content")
+        ]
+
+        # --- Layer 7: current task tool exchanges (oldest pair dropped first) ---
         recent = list(self._recent)
-        while recent:
-            trial = messages + recent
+
+        # Fit conv_hist + recent within budget; trim oldest conv_hist pairs first
+        combined = conv_hist + recent
+        while combined:
+            trial = messages + combined
             used = sum(_tok(m.get("content") or "") for m in trial) + len(trial) * 4
             if used <= int(context_length * 0.85):
                 break
-            if len(recent) >= 2:
-                recent = recent[2:]  # drop one exchange (assistant + tool_response)
+            if len(combined) >= 2:
+                combined = combined[2:]
             else:
-                recent = []
-        messages.extend(recent)
+                combined = []
+        messages.extend(combined)
         return messages
 
     def needs_compression(self, context_length: int) -> bool:
