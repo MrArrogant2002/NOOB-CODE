@@ -22,9 +22,22 @@ import difflib
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
+
+# Matches raw tool-call text the model may emit inline (suppressed from UI tokens).
+# Covers three formats qwen2.5-coder uses:
+#   1. XML-style:     <tool_call>...</tool_call>
+#   2. Code-fenced:   ```json\n{"name":...
+#   3. Bare JSON:     {"name":"read_file","arguments":...
+_TOOL_CALL_RE = re.compile(
+    r"<tool_call>[\s\S]*?</tool_call>"
+    r"|```\w*\s*\{\s*\"name\"\s*:"
+    r"|\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"arguments\"",
+    re.DOTALL,
+)
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -33,6 +46,7 @@ from openai import AsyncOpenAI, OpenAIError
 from backend.checkpoint import cleanup_orphaned_containers, create_checkpoint
 from backend.daemon import get_or_create_session_token, release_lock, warm_up_model
 from backend.indexer.file_tree import build_file_tree
+from backend.indexer.signatures import build_codebase_map
 from backend.memory.long_term_memory import load as load_ltm
 from backend.memory.long_term_memory import update_after_task
 from backend.memory.session_memory import (
@@ -48,6 +62,7 @@ from config import (
     BACKEND_API_VERSION,
     BACKEND_PORT,
     BACKEND_VERSION,
+    CODEBASE_MAP_MAX_TOKENS,
     MAX_ORCHESTRATION_STEPS,
     OLLAMA_BASE_URL,
     PRIMARY_MODEL,
@@ -222,10 +237,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = "") -> None:
 
             elif msg_type == "cancel":
                 sid = msg.get("session_id", "")
+                # Try exact session_id match first; fall back to cancelling ALL
+                # running tasks.  The client sends the backend session_id but
+                # tasks are stored under the client-provided id which may differ
+                # on the very first task (client has no session_id yet → UUID
+                # generated server-side does not match the backend session_id).
+                cancelled = False
                 if sid in conn.active_tasks and not conn.active_tasks[sid].done():
                     conn.active_tasks[sid].cancel()
-                # Also resolve any pending gate with a "deny/reject" so the
-                # task runner unblocks and can handle CancelledError cleanly.
+                    cancelled = True
+                if not cancelled:
+                    for t in conn.active_tasks.values():
+                        if not t.done():
+                            t.cancel()
+                # Unblock any pending interactive gates so the task can exit.
                 for fut in conn.pending.values():
                     if not fut.done():
                         fut.set_result({"decision": "reject"})
@@ -262,7 +287,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = "") -> None:
 
             elif msg_type == "list_models":
                 resp = await list_models()
-                await _send(websocket, json.loads(resp.body))
+                data = json.loads(resp.body)
+                await _send(
+                    websocket,
+                    {"type": "models_list", "models": data.get("models", [])},
+                )
 
             elif msg_type == "get_history":
                 sid = msg.get("session_id", "")
@@ -316,16 +345,17 @@ async def _run_task(websocket: WebSocket, conn: ConnectionState, msg: dict) -> N
     )
     session_id: str = session["session_id"]
 
-    if is_resumed:
-        await _send(
-            websocket,
-            {
-                "type": "session_info",
-                "session_id": session_id,
-                "resumed": True,
-                "message_count": len(session["messages"]),
-            },
-        )
+    # Always send session_info so the panel can display the session ID and
+    # use it for cancellation — even on the very first task for a workspace.
+    await _send(
+        websocket,
+        {
+            "type": "session_info",
+            "session_id": session_id,
+            "resumed": is_resumed,
+            "message_count": len(session["messages"]) if is_resumed else 0,
+        },
+    )
 
     # Memory + indexing (use cached map when available; build on first use)
     ltm_notes = await asyncio.to_thread(load_ltm, workspace)
@@ -374,7 +404,10 @@ async def _run_task(websocket: WebSocket, conn: ConnectionState, msg: dict) -> N
                     update_after_task, task_text, final, workspace, model
                 )
     except asyncio.CancelledError:
-        await _send(websocket, {"type": "info", "message": "Task cancelled."})
+        pass  # Cancel message already sent by the cancel handler above
+    except Exception as exc:
+        logger.exception("Unhandled error in _run_task")
+        await _send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
     finally:
         await asyncio.to_thread(toolbox.close)
 
@@ -401,7 +434,7 @@ async def _execute_mode(
                 websocket,
                 {
                     "type": "warning",
-                    "message": "Context window nearing limit — compressing older messages.",
+                    "message": "Context window near capacity — oldest messages trimmed.",
                 },
             )
 
@@ -512,8 +545,10 @@ async def _plan_mode(
     user_msg = memory._recent[-1]["content"] if memory._recent else ""
     plan_memory.add_user_message(
         f"Task: {user_msg}\n\n"
-        "List the numbered steps you will take. Do NOT call any tools — only produce the plan. "
-        "Be specific about which files you will read/edit and what commands you will run."
+        "If this is a conversational message (greeting, question about yourself, non-coding), "
+        "just respond naturally in 1-2 sentences — no plan needed. "
+        "Otherwise, list the numbered steps you will take to implement the task. "
+        "Do NOT call any tools here — only produce the plan or the conversational reply."
     )
     messages = plan_memory.build_context(None, context_length)
     plan_content = await _stream_llm(websocket, messages, model, emit_tokens=False)
@@ -697,21 +732,101 @@ async def _stream_llm(
 ) -> str:
     assert _ASYNC_CLIENT is not None
     parts: list[str] = []
+    # Accumulate native tool_call deltas keyed by index
+    tc_parts: dict[int, dict[str, str]] = {}
+    # Suppress tool-call JSON from the UI token stream.
+    # Strategy: buffer the first _LOOKAHEAD chars when content starts with '{' or '`'
+    # (both signal a possible tool-call format). Once we accumulate enough to confirm
+    # it's not a tool call, flush the buffer and send normally. If we confirm it IS a
+    # tool call, discard the buffer. This prevents early chunks like `{"name":` from
+    # flashing in the chat before the regex fires on the full accumulated string.
+    _tool_call_suppressed = False
+    _token_buffer: list[str] = []
+    _buffer_flushed = False
+    _LOOKAHEAD = 80  # chars to examine before committing to emit
     try:
-        async with _ASYNC_CLIENT.chat.completions.stream(
+        stream = await _ASYNC_CLIENT.chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOL_SPECS,
-        ) as stream:
-            async for text in stream.text_stream:
-                if text:
-                    parts.append(text)
-                    if emit_tokens:
-                        await _send(websocket, {"type": "token", "content": text})
+            stream=True,
+        )
+        async for chunk in stream:
+            choice = chunk.choices[0] if chunk.choices else None
+            if not choice:
+                continue
+            delta = choice.delta
+
+            # Text content path: suppress tool-call JSON so it never reaches the UI.
+            if delta.content:
+                parts.append(delta.content)
+                if emit_tokens and not _tool_call_suppressed:
+                    accumulated = "".join(parts)
+                    if _TOOL_CALL_RE.search(accumulated):
+                        # Confirmed tool call — discard any buffered tokens
+                        _tool_call_suppressed = True
+                        _token_buffer.clear()
+                    elif not _buffer_flushed:
+                        if len(accumulated) >= _LOOKAHEAD:
+                            # Enough chars with no match — definitely prose, flush buffer
+                            _buffer_flushed = True
+                            for tok in _token_buffer:
+                                await _send(
+                                    websocket, {"type": "token", "content": tok}
+                                )
+                            _token_buffer.clear()
+                            await _send(
+                                websocket, {"type": "token", "content": delta.content}
+                            )
+                        elif _token_buffer or accumulated.lstrip()[:1] in ("{", "`"):
+                            # Suspicious start (or already buffering) — keep holding
+                            _token_buffer.append(delta.content)
+                        else:
+                            # First char is clearly prose — start emitting immediately
+                            _buffer_flushed = True
+                            await _send(
+                                websocket, {"type": "token", "content": delta.content}
+                            )
+                    else:
+                        await _send(
+                            websocket, {"type": "token", "content": delta.content}
+                        )
+
+            # Native structured tool_calls path (qwen2.5 sometimes uses this)
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tc_parts:
+                        tc_parts[idx] = {"name": "", "arguments": ""}
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            tc_parts[idx]["name"] += tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            tc_parts[idx]["arguments"] += tc_delta.function.arguments
+
     except OpenAIError as exc:
         msg = f"LLM error: {exc}"
         await _send(websocket, {"type": "error", "message": msg})
         return msg
+
+    # Flush any buffered tokens that were held for lookahead but never matched a tool call
+    if emit_tokens and not _tool_call_suppressed and _token_buffer:
+        for tok in _token_buffer:
+            await _send(websocket, {"type": "token", "content": tok})
+
+    # If no text came back but we got native tool_calls, convert to the JSON
+    # text format that parse_tool_call() already knows how to parse.
+    if not parts and tc_parts:
+        tc = tc_parts[0]
+        try:
+            args = json.loads(tc["arguments"] or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        call_json = json.dumps({"name": tc["name"], "arguments": args})
+        # Never emit the raw tool-call JSON to the UI — tool_start / tool_result
+        # messages handle display. The JSON stays in parts so parse_tool_call works.
+        parts.append(call_json)
+
     return "".join(parts)
 
 

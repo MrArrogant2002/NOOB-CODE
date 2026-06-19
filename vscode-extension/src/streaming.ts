@@ -167,12 +167,29 @@ export class NoobCodeClient {
       // "close" fires next; let it handle reconnect
     });
 
-    this.ws.on("close", () => {
+    this.ws.on("close", (code: number) => {
       this._connected = false;
-      if (!this.intentionallyClosed) {
-        this._scheduleReconnect();
+      this._emit("disconnected", { type: "disconnected" });
+      if (this.intentionallyClosed) {
+        return;
       }
+      if (code === 4001) {
+        vscode.window.showErrorMessage(
+          "NOOB CODE: Authentication failed — session token mismatch. Run: python setup.py --update"
+        );
+        return;
+      }
+      this._scheduleReconnect();
     });
+  }
+
+  private _emit(type: string, data: Record<string, unknown>): void {
+    const set = this.handlers.get(type);
+    if (set) {
+      for (const h of set) {
+        h(data);
+      }
+    }
   }
 
   private _send(data: Record<string, unknown>): void {

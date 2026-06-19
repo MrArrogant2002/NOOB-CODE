@@ -15,7 +15,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { NoobCodeClient, TaskParams } from "./streaming";
 import { openDiffEditor } from "./diff";
-import { showPermissionPopup } from "./permissions";
+// permissions.ts kept for reference — showPermissionPopup removed (webview is sole UI)
 import { readSettings } from "./settings";
 
 export class NoobCodePanel implements vscode.WebviewViewProvider {
@@ -158,6 +158,10 @@ export class NoobCodePanel implements vscode.WebviewViewProvider {
           this.client
         );
         break;
+
+      case "focus_editor":
+        vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
+        break;
     }
   }
 
@@ -180,6 +184,7 @@ export class NoobCodePanel implements vscode.WebviewViewProvider {
       "models_list",
       "session_info",
       "info",
+      "disconnected",
     ]) {
       this.client.on(t, forward);
     }
@@ -194,15 +199,8 @@ export class NoobCodePanel implements vscode.WebviewViewProvider {
       this.currentSessionId = msg.session_id as string;
     });
 
-    // Show VS Code popup for permission requests (secondary UI — webview is primary)
-    this.client.on("permission_request", (msg) => {
-      showPermissionPopup(
-        msg.request_id as string,
-        msg.action as string,
-        msg.command as string,
-        this.client
-      );
-    });
+    // permission_request is already forwarded to the webview above.
+    // No VS Code notification popup — the inline block in the webview is the only UI.
 
     this.client.on("error", (msg) => {
       const text = msg.message as string;

@@ -12,40 +12,57 @@
 </head>
 <body>
 
-  <!-- ── Header ─────────────────────────────────────────────────────────── -->
-  <header id="header">
-    <span class="logo">NOOB CODE</span>
-    <div class="header-controls">
-      <select id="model-select" title="Active model"></select>
-      <button id="plan-toggle" type="button" class="icon-btn" title="Toggle plan mode">Plan</button>
-      <button id="new-session-btn" type="button" class="icon-btn" title="New session">New</button>
+  <!-- ── Thin header bar ──────────────────────────────────────────────────── -->
+  <div id="toolbar">
+    <div class="toolbar-left">
+      <span id="conn-dot" class="conn-dot disconnected"></span>
+      <span class="brand">NOOB CODE</span>
+      <span id="session-label" class="session-label"></span>
     </div>
-  </header>
-
-  <!-- Status bar (connected / disconnected / warming up) -->
-  <div id="status-bar" class="status-bar disconnected">Connecting to backend…</div>
+  </div>
 
   <!-- ── Chat area ───────────────────────────────────────────────────────── -->
   <div id="chat" role="log" aria-live="polite" aria-label="Conversation"></div>
 
-  <!-- ── Input area ─────────────────────────────────────────────────────── -->
-  <footer id="footer">
-    <div class="input-row">
+  <!-- ── Input (Claude Code style) ──────────────────────────────────────── -->
+  <div id="input-area">
+    <!-- Text field -->
+    <div id="input-wrapper">
       <textarea
         id="task-input"
-        rows="3"
-        placeholder="Type a task… use @filename to attach a file"
+        rows="1"
+        placeholder="Queue a task… use @filename to attach a file"
         aria-label="Task input"
       ></textarea>
     </div>
-    <div class="btn-row">
-      <span id="session-label" class="session-label"></span>
-      <div class="btn-group">
-        <button id="cancel-btn" type="button" class="secondary-btn" disabled>Cancel</button>
-        <button id="send-btn" type="button" class="primary-btn" disabled>Send ▶</button>
+
+    <!-- Bottom action bar -->
+    <div id="input-bar">
+      <div class="bar-left">
+        <button id="new-session-btn" type="button" class="bar-icon-btn" title="New session (clears chat)">+</button>
+        <button id="mode-btn" type="button" class="bar-pill-btn" title="Toggle plan mode">
+          <svg class="bar-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M2 4h12M2 8h8M2 12h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span id="mode-label">Agent</span>
+        </button>
+      </div>
+
+      <div class="bar-right">
+        <select id="model-select" title="Active Ollama model"></select>
+        <button id="main-btn" type="button" class="submit-btn send" disabled title="Send (Ctrl+Enter)">
+          <!-- Arrow icon (send) -->
+          <svg id="icon-send" class="submit-icon" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 2l6 6-6 6M2 8h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+          <!-- Stop icon -->
+          <svg id="icon-stop" class="submit-icon hidden" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/>
+          </svg>
+        </button>
       </div>
     </div>
-  </footer>
+  </div>
 
   <script nonce="{{NONCE}}" src="{{JS_URI}}"></script>
 </body>

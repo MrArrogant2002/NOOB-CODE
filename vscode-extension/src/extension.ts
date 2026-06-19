@@ -215,9 +215,12 @@ async function readSessionToken(
   context: vscode.ExtensionContext,
   port: number
 ): Promise<string> {
-  // The backend writes the token to data/.session_token relative to the project root
-  const projectRoot = path.resolve(context.extensionPath, "..");
-  const tokenPath = path.join(projectRoot, "data", ".session_token");
+  // Must use backendRoot (written by setup.py) — context.extensionPath points to
+  // ~/.vscode/extensions/ once installed, not the project directory.
+  const backendRoot =
+    vscode.workspace.getConfiguration("noobCode").get<string>("backendRoot", "") ||
+    path.resolve(context.extensionPath, "..");
+  const tokenPath = path.join(backendRoot, "data", ".session_token");
 
   // Wait up to 5 s for the file to appear (backend writes it on first startup)
   const deadline = Date.now() + 5000;

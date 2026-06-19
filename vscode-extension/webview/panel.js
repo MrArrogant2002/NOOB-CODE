@@ -1,9 +1,6 @@
 /**
- * NOOB CODE — Webview runtime (panel.js).
- *
- * Runs inside the VS Code WebviewView sandbox. Communicates with the
- * extension host (panel.ts) via acquireVsCodeApi().postMessage() and
- * window.addEventListener('message', …). Never touches the network directly.
+ * NOOB CODE — Webview runtime.
+ * Layout mirrors Claude Code's sidebar: clean chat + minimal input bar.
  *
  * Message flow:
  *   Extension → Webview : window.addEventListener('message', handler)
@@ -15,146 +12,259 @@ const vscode = acquireVsCodeApi();
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-let isRunning       = false;
-let planMode        = false;
-let currentModel    = "";
-let agentBubble     = null;   // current streaming agent <div>
-const spinners      = new Map(); // request_id → <details> element
-const editPending   = new Map(); // request_id → {el, path, new_content}
-const permPending   = new Map(); // request_id → el
+let isRunning    = false;
+let planMode     = false;
+let currentModel = "";
+let agentBubble  = null;
+let agentRawText = "";
+const spinners   = new Map();
+const editPending  = new Map();
+const permPending  = new Map();
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
 const chat          = document.getElementById("chat");
 const taskInput     = document.getElementById("task-input");
-const sendBtn       = document.getElementById("send-btn");
-const cancelBtn     = document.getElementById("cancel-btn");
+const mainBtn       = document.getElementById("main-btn");
+const iconSend      = document.getElementById("icon-send");
+const iconStop      = document.getElementById("icon-stop");
 const newSessionBtn = document.getElementById("new-session-btn");
-const planToggle    = document.getElementById("plan-toggle");
+const modeBtn       = document.getElementById("mode-btn");
+const modeLabel     = document.getElementById("mode-label");
 const modelSelect   = document.getElementById("model-select");
-const statusBar     = document.getElementById("status-bar");
+const connDot       = document.getElementById("conn-dot");
 const sessionLabel  = document.getElementById("session-label");
 
-// ── Incoming messages from extension host ─────────────────────────────────────
+// ── Incoming messages ─────────────────────────────────────────────────────────
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
   if (!msg || !msg.type) { return; }
 
   switch (msg.type) {
-    // Connection lifecycle
     case "connected":
-      setStatus("connected", "Connected");
-      enableInput();
+      connDot.className = "conn-dot connected";
+      mainBtn.disabled = false;
+      taskInput.disabled = false;
+      taskInput.focus();
       break;
 
-    // Streaming token
+    case "disconnected":
+      connDot.className = "conn-dot disconnected";
+      break;
+
     case "token":
       appendToken(msg.content);
       break;
 
-    // Tool execution
     case "tool_start":
+      finaliseAgentBubble();
       addToolStart(msg.request_id, msg.name, msg.args);
       break;
+
     case "tool_result":
       fillToolResult(msg.request_id, msg.result);
       break;
 
-    // Edit approval
     case "edit_request":
       finaliseAgentBubble();
       addEditRequest(msg.request_id, msg.path, msg.diff, msg.new_content);
       break;
 
-    // Permission gate
     case "permission_request":
       finaliseAgentBubble();
       addPermissionRequest(msg.request_id, msg.action, msg.command);
       break;
 
-    // Plan mode
     case "plan_ready":
       finaliseAgentBubble();
       addPlanBlock(msg.steps);
       break;
 
-    // Task done
-    case "done":
+    case "done": {
+      // Only show final_answer notice when no tokens were streamed (avoids duplication)
+      const hadContent = agentRawText.trim().length > 0;
       finaliseAgentBubble();
-      addNotice("done", "✓ " + (msg.final_answer ?? "Done"));
+      if (!hadContent && msg.final_answer) {
+        addNotice("done", "✓ " + msg.final_answer);
+      }
       setRunning(false);
       break;
+    }
 
-    // Notices
     case "warning":
       addNotice("warning", "⚠ " + msg.message);
       break;
+
     case "error":
       finaliseAgentBubble();
       addNotice("error", "✗ " + msg.message);
       setRunning(false);
       break;
+
     case "info":
+      if (msg.message === "Task cancelled.") {
+        finaliseAgentBubble();
+        setRunning(false);
+      }
       addNotice("info", msg.message);
       break;
 
-    // Model list
     case "models_list":
       populateModels(msg.models ?? []);
       break;
 
-    // Session info
     case "session_info":
-      sessionLabel.textContent = "Session " + (msg.session_id ?? "").slice(0, 8);
+      sessionLabel.textContent = "#" + (msg.session_id ?? "").slice(0, 7);
       break;
 
-    // New session cleared
     case "cleared":
       clearChat();
       break;
 
-    // Prefill from debugFix command
     case "prefill_task":
       taskInput.value = msg.task ?? "";
+      autoResize(taskInput);
       taskInput.focus();
       break;
   }
 });
 
-// ── Rendering helpers ─────────────────────────────────────────────────────────
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderMarkdown(text) {
+  const parts = [];
+  const fenceRe = /```(\w*)\n?([\s\S]*?)```/g;
+  let last = 0;
+  let m;
+  while ((m = fenceRe.exec(text)) !== null) {
+    if (m.index > last) { parts.push(renderInline(text.slice(last, m.index))); }
+    const lang = escapeHtml(m[1] || "");
+    const code = escapeHtml(m[2].replace(/\n$/, ""));
+    const hdr  = lang ? `<div class="code-header">${lang}</div>` : "";
+    parts.push(`<pre>${hdr}<code>${code}</code></pre>`);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) { parts.push(renderInline(text.slice(last))); }
+  return parts.join("");
+}
+
+function renderInline(text) {
+  let html = escapeHtml(text);
+
+  // Stash inline code so other patterns don't touch it
+  const stash = [];
+  html = html.replace(/`([^`\n]+)`/g, (_, c) => { stash.push(c); return `\x00C${stash.length - 1}\x00`; });
+
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>");
+  html = html.replace(/^#{5,} (.+)$/gm, "<h4>$1</h4>");  // h5/h6 → h4 (same visual)
+  html = html.replace(/^#### (.+)$/gm, "<h4>$1</h4>");
+  html = html.replace(/^### (.+)$/gm,  "<h3>$1</h3>");
+  html = html.replace(/^## (.+)$/gm,   "<h2>$1</h2>");
+  html = html.replace(/^# (.+)$/gm,    "<h1>$1</h1>");
+
+  html = html.replace(/((?:^[-*] .+$\n?)+)/gm, (b) =>
+    "<ul>" + b.trim().split("\n").map((l) => `<li>${l.replace(/^[-*] /, "")}</li>`).join("") + "</ul>"
+  );
+  html = html.replace(/((?:^\d+\. .+$\n?)+)/gm, (b) =>
+    "<ol>" + b.trim().split("\n").map((l) => `<li>${l.replace(/^\d+\. /, "")}</li>`).join("") + "</ol>"
+  );
+
+  html = html.replace(/\x00C(\d+)\x00/g, (_, i) => `<code>${stash[+i]}</code>`);
+
+  html = html.split(/\n{2,}/).map((block) => {
+    const t = block.trim();
+    if (!t) { return ""; }
+    if (/^<(h[1-3]|ul|ol|pre)/.test(t)) { return t.replace(/\n/g, "<br>"); }
+    return `<p>${t.replace(/\n/g, "<br>")}</p>`;
+  }).join("");
+
+  // Merge adjacent list blocks so items separated by blank lines get sequential numbers
+  html = html.replace(/<\/ol>\s*<ol>/g, "");
+  html = html.replace(/<\/ul>\s*<ul>/g, "");
+
+  return html;
+}
+
+// ── Chat rendering ────────────────────────────────────────────────────────────
+
+function addThinkingBubble() {
+  agentBubble = document.createElement("div");
+  agentBubble.className = "msg-agent streaming thinking";
+  agentBubble.innerHTML = '<span class="thinking-dots"><span></span><span></span><span></span></span>';
+  chat.appendChild(agentBubble);
+  scrollToBottom();
+}
 
 function appendToken(text) {
   if (!agentBubble) {
     agentBubble = document.createElement("div");
-    agentBubble.className = "msg msg-agent";
+    agentBubble.className = "msg-agent streaming";
     chat.appendChild(agentBubble);
+    agentRawText = "";
   }
-  agentBubble.textContent += text;
+  if (agentBubble.classList.contains("thinking")) {
+    agentBubble.classList.remove("thinking");
+    agentBubble.innerHTML = "";
+  }
+  agentRawText += text;
+  agentBubble.textContent = agentRawText;
   scrollToBottom();
 }
 
+function looksLikeToolCall(text) {
+  // Strip leading code fence then check if what remains starts with a tool-call JSON.
+  // Use \s* between { and "name" because the model sometimes puts them on separate lines.
+  const t = text.replace(/^```\w*\s*/, "").trim();
+  return /^\{\s*"name"/.test(t) || /^<tool_call>/.test(t);
+}
+
+function stripToolCallSuffix(text) {
+  // Remove a tool-call block that appears at the tail of a prose response.
+  // Handles code-fenced: \n```json\n{\n"name": and bare: \n{"name": or \n{\n"name":
+  return text
+    .replace(/\n```\w*\s*\{\s*"name"[\s\S]*$/, "")   // code-fenced tool call
+    .replace(/\n\{\s*"name"[\s\S]*$/, "")              // bare JSON tool call
+    .trimEnd();
+}
+
 function finaliseAgentBubble() {
-  agentBubble = null;
+  if (!agentBubble) { return; }
+  agentBubble.classList.remove("streaming");
+  const text = agentRawText.trim();
+  if (text) {
+    if (looksLikeToolCall(text)) {
+      agentBubble.remove();
+    } else {
+      agentBubble.innerHTML = renderMarkdown(stripToolCallSuffix(text));
+    }
+  } else {
+    agentBubble.remove();
+  }
+  agentBubble  = null;
+  agentRawText = "";
 }
 
 function addToolStart(requestId, name, args) {
-  const el = document.createElement("details");
+  const el  = document.createElement("details");
   el.className = "tool-block";
 
-  const summary = document.createElement("summary");
-  const spinner = document.createElement("span");
-  spinner.className = "spinner";
-  const nameEl = document.createElement("span");
-  nameEl.className = "tool-name";
-  nameEl.textContent = name;
-  const argsEl = document.createElement("span");
-  argsEl.textContent = formatArgs(args);
-  summary.appendChild(spinner);
-  summary.appendChild(nameEl);
-  summary.appendChild(argsEl);
-  el.appendChild(summary);
+  const sum = document.createElement("summary");
+  const sp  = document.createElement("span"); sp.className = "spinner";
+  const nm  = document.createElement("span"); nm.className = "tool-name"; nm.textContent = name;
+  const ar  = document.createElement("span"); ar.className = "tool-args"; ar.textContent = fmtArgs(args);
 
+  sum.appendChild(sp); sum.appendChild(nm); sum.appendChild(ar);
+  el.appendChild(sum);
   chat.appendChild(el);
   spinners.set(requestId, el);
   scrollToBottom();
@@ -164,69 +274,47 @@ function fillToolResult(requestId, result) {
   const el = spinners.get(requestId);
   if (!el) { return; }
   spinners.delete(requestId);
-
-  // Remove spinner from summary
-  const spin = el.querySelector(".spinner");
-  if (spin) { spin.remove(); }
-
-  const resultEl = document.createElement("div");
-  resultEl.className = "tool-result";
-  resultEl.textContent = result ?? "";
-  el.appendChild(resultEl);
-  // Leave collapsed by default
+  const sp = el.querySelector(".spinner");
+  if (sp) { sp.remove(); }
+  const r = document.createElement("div");
+  r.className = "tool-result";
+  r.textContent = result ?? "";
+  el.appendChild(r);
   scrollToBottom();
 }
 
 function addEditRequest(requestId, filePath, diff, newContent) {
-  const el = document.createElement("div");
-  el.className = "edit-block";
-
-  const header = document.createElement("div");
-  header.className = "edit-header";
-  header.textContent = `✏ Edit requested: ${filePath}`;
-  el.appendChild(header);
+  const el  = document.createElement("div"); el.className = "edit-block";
+  const hdr = document.createElement("div"); hdr.className = "edit-header";
+  hdr.textContent = `✏ Edit: ${filePath}`;
+  el.appendChild(hdr);
 
   if (diff) {
-    const diffEl = document.createElement("div");
-    diffEl.className = "edit-diff";
-    diffEl.innerHTML = colourDiff(escapeHtml(diff));
-    el.appendChild(diffEl);
+    const d = document.createElement("div"); d.className = "edit-diff";
+    d.innerHTML = colourDiff(escapeHtml(diff));
+    el.appendChild(d);
   }
 
-  const actions = document.createElement("div");
-  actions.className = "edit-actions";
-
-  const approveBtn = makeBtn("Approve", "primary-btn", () => {
-    resolve(requestId, "approve");
-    disableActions(el);
-    el.querySelector(".edit-header").textContent = `✓ Approved: ${filePath}`;
-  });
-  const allBtn = makeBtn("Approve All", "secondary-btn", () => {
-    resolve(requestId, "approve_all");
-    disableActions(el);
-    el.querySelector(".edit-header").textContent = `✓ Approved all: ${filePath}`;
-  });
-  const rejectBtn = makeBtn("Reject", "danger-btn", () => {
-    resolve(requestId, "reject");
-    disableActions(el);
-    el.querySelector(".edit-header").textContent = `✗ Rejected: ${filePath}`;
-  });
-
+  const act = document.createElement("div"); act.className = "gate-actions";
   if (newContent !== undefined) {
-    const diffEditorBtn = makeBtn("Open Diff ↗", "link-btn", () => {
-      vscode.postMessage({ type: "open_diff", request_id: requestId, path: filePath, new_content: newContent });
-    });
-    actions.appendChild(diffEditorBtn);
+    act.appendChild(mkBtn("Open Diff ↗", "link-btn", () =>
+      vscode.postMessage({ type: "open_diff", request_id: requestId, path: filePath, new_content: newContent })
+    ));
   }
+  act.appendChild(mkBtn("Approve", "primary-btn", () => {
+    resolve(requestId, "approve"); hdr.textContent = `✓ Approved: ${filePath}`; disableAct(el);
+  }));
+  act.appendChild(mkBtn("Approve All", "secondary-btn", () => {
+    resolve(requestId, "approve_all"); hdr.textContent = `✓ All approved`; disableAct(el);
+  }));
+  act.appendChild(mkBtn("Reject", "danger-btn", () => {
+    resolve(requestId, "reject"); hdr.textContent = `✗ Rejected`; disableAct(el);
+  }));
 
-  actions.appendChild(approveBtn);
-  actions.appendChild(allBtn);
-  actions.appendChild(rejectBtn);
-  el.appendChild(actions);
-
+  el.appendChild(act);
   editPending.set(requestId, { el, filePath, newContent });
   chat.appendChild(el);
-  scrollToBottom();
+  requestAnimationFrame(() => scrollToBottom());
 
   function resolve(id, decision) {
     vscode.postMessage({ type: "approval", request_id: id, decision });
@@ -235,46 +323,30 @@ function addEditRequest(requestId, filePath, diff, newContent) {
 }
 
 function addPermissionRequest(requestId, action, command) {
-  const el = document.createElement("div");
-  el.className = "perm-block";
+  const el  = document.createElement("div"); el.className = "perm-block";
+  const hdr = document.createElement("div"); hdr.className = "perm-header";
+  hdr.textContent = `🔐 Permission: ${action}`;
+  el.appendChild(hdr);
 
-  const header = document.createElement("div");
-  header.className = "perm-header";
-  header.textContent = `🔐 Permission required: ${action}`;
-  el.appendChild(header);
-
-  const cmd = document.createElement("div");
-  cmd.className = "perm-cmd";
+  const cmd = document.createElement("div"); cmd.className = "perm-cmd";
   cmd.textContent = command ?? action;
   el.appendChild(cmd);
 
-  const actions = document.createElement("div");
-  actions.className = "perm-actions";
+  const act = document.createElement("div"); act.className = "gate-actions";
+  act.appendChild(mkBtn("Allow", "primary-btn", () => {
+    resolve(requestId, "allow"); hdr.textContent = `✓ Allowed: ${action}`; disableAct(el);
+  }));
+  act.appendChild(mkBtn("Allow Always", "secondary-btn", () => {
+    resolve(requestId, "always_allow"); hdr.textContent = `✓ Always: ${action}`; disableAct(el);
+  }));
+  act.appendChild(mkBtn("Deny", "danger-btn", () => {
+    resolve(requestId, "deny"); hdr.textContent = `✗ Denied`; disableAct(el);
+  }));
 
-  const allow = makeBtn("Allow", "primary-btn", () => {
-    resolve(requestId, "allow");
-    header.textContent = `✓ Allowed: ${action}`;
-    disableActions(el);
-  });
-  const always = makeBtn("Allow Always", "secondary-btn", () => {
-    resolve(requestId, "always_allow");
-    header.textContent = `✓ Always allowed: ${action}`;
-    disableActions(el);
-  });
-  const deny = makeBtn("Deny", "danger-btn", () => {
-    resolve(requestId, "deny");
-    header.textContent = `✗ Denied: ${action}`;
-    disableActions(el);
-  });
-
-  actions.appendChild(allow);
-  actions.appendChild(always);
-  actions.appendChild(deny);
-  el.appendChild(actions);
-
+  el.appendChild(act);
   permPending.set(requestId, el);
   chat.appendChild(el);
-  scrollToBottom();
+  requestAnimationFrame(() => scrollToBottom());
 
   function resolve(id, decision) {
     vscode.postMessage({ type: "permission", request_id: id, decision });
@@ -283,43 +355,27 @@ function addPermissionRequest(requestId, action, command) {
 }
 
 function addPlanBlock(steps) {
-  const el = document.createElement("div");
-  el.className = "plan-block";
-
-  const header = document.createElement("div");
-  header.className = "plan-header";
-  header.textContent = "📋 Plan — review before executing";
-  el.appendChild(header);
+  const el  = document.createElement("div"); el.className = "plan-block";
+  const hdr = document.createElement("div"); hdr.className = "plan-header";
+  hdr.textContent = "📋 Plan — review before executing";
+  el.appendChild(hdr);
 
   const ol = document.createElement("ol");
-  for (const step of steps) {
-    const li = document.createElement("li");
-    li.textContent = step;
-    ol.appendChild(li);
-  }
+  (steps || []).forEach((s) => { const li = document.createElement("li"); li.textContent = s; ol.appendChild(li); });
   el.appendChild(ol);
 
-  const actions = document.createElement("div");
-  actions.className = "plan-actions";
-
-  const execBtn = makeBtn("Execute Plan ▶", "primary-btn", () => {
-    vscode.postMessage({ type: "plan_execute" });
-    header.textContent = "▶ Executing plan…";
-    disableActions(el);
-  });
-  const cancelPlanBtn = makeBtn("Cancel", "danger-btn", () => {
-    vscode.postMessage({ type: "plan_cancel" });
-    header.textContent = "✗ Plan cancelled";
-    disableActions(el);
-    setRunning(false);
-  });
-
-  actions.appendChild(execBtn);
-  actions.appendChild(cancelPlanBtn);
-  el.appendChild(actions);
-
+  const act = document.createElement("div"); act.className = "gate-actions";
+  act.appendChild(mkBtn("Execute Plan ▶", "primary-btn", () => {
+    vscode.postMessage({ type: "plan_execute" }); hdr.textContent = "▶ Executing…"; disableAct(el);
+  }));
+  act.appendChild(mkBtn("Cancel", "danger-btn", () => {
+    vscode.postMessage({ type: "plan_cancel" }); hdr.textContent = "✗ Cancelled"; disableAct(el); setRunning(false);
+  }));
+  el.appendChild(act);
   chat.appendChild(el);
-  scrollToBottom();
+  // rAF ensures the browser paints the full block height before we scroll,
+  // so the Execute/Cancel buttons are fully visible, not clipped.
+  requestAnimationFrame(() => scrollToBottom());
 }
 
 function addNotice(type, text) {
@@ -334,140 +390,105 @@ function populateModels(models) {
   const prev = modelSelect.value;
   modelSelect.innerHTML = "";
   if (!models.length) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(no models found)";
-    modelSelect.appendChild(opt);
+    const o = document.createElement("option"); o.value = ""; o.textContent = "(no models)";
+    modelSelect.appendChild(o);
     return;
   }
-  for (const m of models) {
-    const opt = document.createElement("option");
-    opt.value = m.name;
-    opt.textContent = m.name;
-    modelSelect.appendChild(opt);
-  }
-  // Restore previous selection if still available
+  models.forEach((m) => {
+    const o = document.createElement("option"); o.value = m.name; o.textContent = m.name;
+    modelSelect.appendChild(o);
+  });
   if (prev && modelSelect.querySelector(`option[value="${CSS.escape(prev)}"]`)) {
     modelSelect.value = prev;
   }
   currentModel = modelSelect.value;
 }
 
-// ── Status & running state ────────────────────────────────────────────────────
-
-function setStatus(cls, text) {
-  statusBar.className = "status-bar " + cls;
-  statusBar.textContent = text;
-  if (cls === "connected") {
-    setTimeout(() => { statusBar.className = "status-bar hidden"; }, 3000);
-  }
-}
+// ── State helpers ─────────────────────────────────────────────────────────────
 
 function setRunning(running) {
   isRunning = running;
-  sendBtn.disabled  = running;
-  cancelBtn.disabled = !running;
   taskInput.disabled = running;
-}
 
-function enableInput() {
-  sendBtn.disabled  = false;
-  cancelBtn.disabled = true;
-  taskInput.disabled = false;
-}
-
-// ── UI utilities ──────────────────────────────────────────────────────────────
-
-function makeBtn(label, cls, onClick) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = cls;
-  btn.textContent = label;
-  btn.addEventListener("click", onClick);
-  return btn;
-}
-
-function disableActions(el) {
-  for (const btn of el.querySelectorAll("button")) {
-    btn.disabled = true;
+  if (running) {
+    mainBtn.classList.replace("send", "stop");
+    mainBtn.title = "Stop task";
+    iconSend.classList.add("hidden");
+    iconStop.classList.remove("hidden");
+  } else {
+    mainBtn.classList.replace("stop", "send");
+    mainBtn.title = "Send (Ctrl+Enter)";
+    iconStop.classList.add("hidden");
+    iconSend.classList.remove("hidden");
   }
 }
 
-function scrollToBottom() {
-  chat.scrollTop = chat.scrollHeight;
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+function mkBtn(label, cls, fn) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = cls; b.textContent = label;
+  b.addEventListener("click", fn);
+  return b;
+}
+
+function disableAct(el) {
+  el.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+}
+
+function scrollToBottom() { chat.scrollTop = chat.scrollHeight; }
+
+function autoResize(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 180) + "px";
+}
+
+function fmtArgs(args) {
+  if (!args || typeof args !== "object") { return ""; }
+  const keys = Object.keys(args);
+  if (!keys.length) { return ""; }
+  const s = keys.slice(0, 2).map((k) => {
+    const v = typeof args[k] === "string" ? args[k] : JSON.stringify(args[k]);
+    return v.slice(0, 48) + (v.length > 48 ? "…" : "");
+  }).join(" · ");
+  return "  " + s;
+}
+
+function colourDiff(html) {
+  return html.split("\n").map((l) => {
+    if (l.startsWith("+"))  { return `<span class="diff-add">${l}</span>`; }
+    if (l.startsWith("-"))  { return `<span class="diff-del">${l}</span>`; }
+    if (l.startsWith("@@")) { return `<span class="diff-hunk">${l}</span>`; }
+    return l;
+  }).join("\n");
 }
 
 function clearChat() {
   chat.innerHTML = "";
-  agentBubble = null;
-  spinners.clear();
-  editPending.clear();
-  permPending.clear();
+  agentBubble = null; agentRawText = "";
+  spinners.clear(); editPending.clear(); permPending.clear();
   sessionLabel.textContent = "";
   setRunning(false);
 }
 
-function formatArgs(args) {
-  if (!args || typeof args !== "object") { return ""; }
-  const keys = Object.keys(args);
-  if (!keys.length) { return ""; }
-  const parts = keys.slice(0, 3).map((k) => {
-    const v = args[k];
-    const s = typeof v === "string" ? v : JSON.stringify(v);
-    return `${k}: ${s.slice(0, 40)}${s.length > 40 ? "…" : ""}`;
-  });
-  return " (" + parts.join(", ") + ")";
-}
-
-function escapeHtml(text) {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function colourDiff(html) {
-  // Apply colour classes line by line without innerHTML injection risks
-  // (input is already HTML-escaped, we just wrap lines in spans)
-  return html
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("+")) {
-        return `<span class="diff-add">${line}</span>`;
-      } else if (line.startsWith("-")) {
-        return `<span class="diff-del">${line}</span>`;
-      } else if (line.startsWith("@@")) {
-        return `<span class="diff-hunk">${line}</span>`;
-      }
-      return line;
-    })
-    .join("\n");
-}
-
 // ── Event listeners ───────────────────────────────────────────────────────────
 
-sendBtn.addEventListener("click", sendTask);
+mainBtn.addEventListener("click", () => { isRunning ? cancelTask() : sendTask(); });
 
+taskInput.addEventListener("input", () => autoResize(taskInput));
 taskInput.addEventListener("keydown", (e) => {
-  // Ctrl+Enter or Cmd+Enter sends the task
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-    e.preventDefault();
-    sendTask();
-  }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (!isRunning) { sendTask(); } }
+  if (e.key === "Escape") { vscode.postMessage({ type: "focus_editor" }); }
 });
 
-cancelBtn.addEventListener("click", () => {
-  vscode.postMessage({ type: "cancel" });
-});
+newSessionBtn.addEventListener("click", () => vscode.postMessage({ type: "new_session" }));
 
-newSessionBtn.addEventListener("click", () => {
-  vscode.postMessage({ type: "new_session" });
-});
-
-planToggle.addEventListener("click", () => {
+// Mode toggle: Agent ↔ Plan
+modeBtn.addEventListener("click", () => {
   planMode = !planMode;
-  planToggle.classList.toggle("active", planMode);
-  planToggle.title = planMode ? "Plan mode ON — click to disable" : "Toggle plan mode";
+  modeLabel.textContent = planMode ? "Plan" : "Agent";
+  modeBtn.classList.toggle("plan-active", planMode);
+  modeBtn.title = planMode ? "Plan mode — agent drafts a plan first" : "Agent mode — execute immediately";
 });
 
 modelSelect.addEventListener("change", () => {
@@ -475,31 +496,34 @@ modelSelect.addEventListener("change", () => {
   vscode.postMessage({ type: "change_model", model: currentModel });
 });
 
-// Request model list on load
 vscode.postMessage({ type: "get_models" });
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+
+function cancelTask() {
+  vscode.postMessage({ type: "cancel" });
+}
 
 function sendTask() {
   const task = taskInput.value.trim();
   if (!task || isRunning) { return; }
 
-  // Extract @file mentions
   const fileMentions = [];
-  const mentionRe = /@([\w./\\-]+)/g;
-  let match;
-  while ((match = mentionRe.exec(task)) !== null) {
-    fileMentions.push(match[1]);
-  }
+  const re = /@([\w./\\-]+)/g;
+  let m;
+  while ((m = re.exec(task)) !== null) { fileMentions.push(m[1]); }
 
-  // Show user bubble
-  const userBubble = document.createElement("div");
-  userBubble.className = "msg msg-user";
-  userBubble.textContent = task;
-  chat.appendChild(userBubble);
+  const bubble = document.createElement("div");
+  bubble.className = "msg-user";
+  bubble.textContent = task;
+  chat.appendChild(bubble);
   scrollToBottom();
 
   taskInput.value = "";
+  autoResize(taskInput);
   setRunning(true);
-  agentBubble = null;
+  agentBubble = null; agentRawText = "";
+  addThinkingBubble();
 
   vscode.postMessage({
     type: "send_task",
