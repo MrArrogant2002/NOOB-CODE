@@ -230,10 +230,14 @@ function looksLikeToolCall(text) {
 
 function stripToolCallSuffix(text) {
   // Remove a tool-call block that appears at the tail of a prose response.
-  // Handles code-fenced: \n```json\n{\n"name": and bare: \n{"name": or \n{\n"name":
+  // Patterns match even when the JSON is truncated mid-stream (no closing "):
+  //   code-fenced:  \n```json\n{"name   (partial — "name": never arrived)
+  //   bare JSON:    \n{"name   (same)
+  //   orphan fence: \n```json\n  (code fence opened, no content written yet)
   return text
-    .replace(/\n```\w*\s*\{\s*"name"[\s\S]*$/, "")   // code-fenced tool call
-    .replace(/\n\{\s*"name"[\s\S]*$/, "")              // bare JSON tool call
+    .replace(/\n```\w*\s*\{\s*"name[\s\S]*$/, "")   // code-fenced tool call (partial or complete)
+    .replace(/\n\{\s*"name[\s\S]*$/, "")              // bare JSON tool call (partial or complete)
+    .replace(/\n```\w*\s*$/, "")                      // orphaned opening fence with no content
     .trimEnd();
 }
 

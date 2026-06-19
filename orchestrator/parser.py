@@ -32,9 +32,11 @@ def parse_tool_call(content: str) -> ToolCall | None:
     if tag_match:
         candidates.append(tag_match.group(1))
 
-    fence_match = _CODE_FENCE_PATTERN.search(content)
-    if fence_match:
-        candidates.append(fence_match.group(1))
+    # Try ALL complete code fences in REVERSE order — the model sometimes prepends an
+    # example fence (e.g. "Given: {path}") before the actual tool-call fence ("Invoke:
+    # {"name":...}).  The last complete fence is the most likely actual tool call.
+    for m in reversed(list(_CODE_FENCE_PATTERN.finditer(content))):
+        candidates.append(m.group(1))
 
     candidates.append(content)
 
